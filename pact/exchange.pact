@@ -131,14 +131,16 @@
     pair-key:string
     observation-capacity:integer
     observations-made:integer
-    cumulative-price:decimal
+    cumulative-price0:decimal
+    cumulative-price1:decimal
     last-observed:time)
 
   (deftable oracles:{oracle})
 
   (defschema observation
     timestamp:time
-    cumulative-price:decimal)
+    price0:decimal
+    price1:decimal)
 
   (deftable observations:{observation})
 
@@ -199,7 +201,8 @@
     )
     (insert observations (compose-observation-key pair-key nth-slot)
       { 'timestamp: EPOCH_ZERO
-      , 'cumulative-price: 0.0 }))
+      , 'price0: 0.0
+      , 'price1: 0.0 }))
 
   (defun extend-oracle
     ( pair-key:string
@@ -251,10 +254,11 @@
 
   (defun adjust
     ( observation-pair
+      quote-leg0:bool
       target-time:time
     )
-    (bind (at 'left-observation observation-pair) { 'timestamp := time-start, 'cumulative-price := price-start }
-      (bind (at 'right-observation observation-pair) { 'timestamp := time-end, 'cumulative-price := price-end }
+    (bind (at 'left-observation observation-pair) { 'timestamp := time-start, (if quote-leg0 'price0 'price1) := price-start }
+      (bind (at 'right-observation observation-pair) { 'timestamp := time-end, (if quote-leg0 'price0 'price1) := price-end }
       (if (= target-time time-start)
         { 'cumulative-price: price-start
         , 'timestamp: time-start }
@@ -272,6 +276,7 @@
 
   (defun estimate-price:decimal
     ( pair-key:string
+      quote-leg0:bool
       start:time
       end:time
     )
@@ -282,8 +287,8 @@
       (enforce (!= {} start-observation-pair) "Did not find start observation")
       (enforce (!= {} end-observation-pair) "Did not find end observation")
       (let*
-        ( (start-adjusted (adjust start-observation-pair start))
-          (end-adjusted (adjust end-observation-pair end))
+        ( (start-adjusted (adjust start-observation-pair quote-leg0 start))
+          (end-adjusted (adjust end-observation-pair quote-leg0 end))
           (price-difference (- (at 'cumulative-price end-adjusted) (at 'cumulative-price start-adjusted)))
           (time-difference (diff-time (at 'timestamp end-adjusted) (at 'timestamp start-adjusted)))
         )
@@ -320,16 +325,20 @@
         (leg0 (at 'leg0 pair))
         (leg1 (at 'leg1 pair))
         (last-observed (at 'last-observed oracle))
-        (last-cumulative (at 'cumulative-price oracle))
+        (last-cumulative-price0 (at 'cumulative-price0 oracle))
+        (last-cumulative-price1 (at 'cumulative-price1 oracle))
         (block-time (at 'block-time (chain-data)))
         (time-delta (diff-time block-time last-observed))
         (reserve0 (at 'reserve leg0))
         (reserve1 (at 'reserve leg1))
-        (price (try 0.0 (/ reserve0 reserve1)))
-        (current-cumulative (round (+ last-cumulative (* time-delta price)) 8))
+        (price0 (try 0.0 (/ reserve0 reserve1)))
+        (price1 (try 0.0 (/ reserve1 reserve0)))
+        (cumulative-price0 (round (+ last-cumulative-price0 (* time-delta price0)) 8))
+        (cumulative-price1 (round (+ last-cumulative-price1 (* time-delta price1)) 8))
       )
       { 'timestamp: block-time
-      , 'cumulative-price: current-cumulative }
+      , 'price0: cumulative-price0
+      , 'price1: cumulative-price1 }
     )
   )
 
@@ -345,7 +354,8 @@
           { 'pair-key: pair-key
           , 'observations-made: 0
           , 'observation-capacity: 1
-          , 'cumulative-price: 0.0
+          , 'cumulative-price0: 0.0
+          , 'cumulative-price1: 0.0
           , 'last-observed: (at 'block-time (chain-data)) }
         ) "")
       (let*
@@ -358,12 +368,14 @@
           (let*
             ( (new-observation (observe oracle pair-key))
               (target-key (get-observation-key oracle 1))
-              (current-cumulative (at 'cumulative-price new-observation))
+              (cumulative-price0 (at 'price0 new-observation))
+              (cumulative-price1 (at 'price1 new-observation))
             )
             (write observations target-key new-observation)
             (update oracles pair-key
               { 'observations-made: (+ 1 (at 'observations-made oracle))
-              , 'cumulative-price: current-cumulative
+              , 'cumulative-price0: cumulative-price0
+              , 'cumulative-price1: cumulative-price1
               , 'last-observed: block-time })
             true
           )
