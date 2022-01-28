@@ -137,10 +137,8 @@
   (deftable oracles:{oracle})
 
   (defschema observation
-    timestamp-start:time
-    timestamp-end:time
-    cumulative-price-start:decimal
-    cumulative-price-end:decimal)
+    timestamp:time
+    cumulative-price:decimal)
 
   (deftable observations:{observation})
 
@@ -161,15 +159,7 @@
     ( oracle:object{oracle}
       relative-index:integer
     )
-    (let*
-      ( (observation-key (get-observation-key oracle relative-index))
-        (read-observation (read observations observation-key))
-      )
-      (if (or (= {} read-observation) (= (at 'timestamp-start read-observation) EPOCH_ZERO))
-        read-observation
-        read-observation)
-    )
-  )
+    (read observations (get-observation-key oracle relative-index)))
 
   (defun dump-observations:[object{observation}]
     ( pair-key:string
@@ -208,10 +198,8 @@
       nth-slot:integer
     )
     (insert observations (compose-observation-key pair-key nth-slot)
-      { 'timestamp-start: EPOCH_ZERO
-      , 'timestamp-end: EPOCH_ZERO
-      , 'cumulative-price-start: 0.0
-      , 'cumulative-price-end: 0.0 }))
+      { 'timestamp: EPOCH_ZERO
+      , 'cumulative-price: 0.0 }))
 
   (defun extend-oracle
     ( pair-key:string
@@ -235,14 +223,15 @@
       (let*
         ( (oracle (at 'oracle a))
           (query-time (at 'time a))
-          (observation (read observations (get-observation-key oracle b)))
-          (found (observation-in-range observation query-time))
+          (previous-observation (at 'current a))
+          (next-observation (read observations (get-observation-key oracle b)))
+          (found (observation-in-range previous-observation next-observation query-time))
         )
         { 'found: found
-        , 'result: observation
+        , 'current: next-observation
+        , 'prev: previous-observation
         , 'oracle: oracle
-        , 'time: query-time}
-      )))
+        , 'time: query-time})))
 
   (defun search-for-observation:object{observation}
     ( pair-key:string
@@ -253,22 +242,19 @@
         (observation-capacity (at 'observation-capacity oracle))
         (result (fold
           (short-circuit-query)
-          { 'found: false, 'time: target, 'oracle: oracle }
+          { 'found: false, 'time: target, 'oracle: oracle, 'current: {} }
           (enumerate (- observation-capacity 1) 0)))
       )
-      (if (at 'found result) (at 'result result) {})
-    )
-  )
+      (if (at 'found result)
+        { 'left-observation: (at 'prev result), 'right-observation: (at 'current result) }
+        {})))
 
   (defun adjust
-    ( observation:object{observation}
+    ( observation-pair
       target-time:time
     )
-    (bind observation
-      { 'cumulative-price-start := price-start
-      , 'cumulative-price-end := price-end
-      , 'timestamp-start := time-start
-      , 'timestamp-end := time-end}
+    (bind (at 'left-observation observation-pair) { 'timestamp := time-start, 'cumulative-price := price-start }
+      (bind (at 'right-observation observation-pair) { 'timestamp := time-end, 'cumulative-price := price-end }
       (if (= target-time time-start)
         { 'cumulative-price: price-start
         , 'timestamp: time-start }
@@ -282,7 +268,7 @@
               (price-adjustment-from-start (* price-span adjustment-ratio))
             )
             { 'cumulative-price: (+ price-start price-adjustment-from-start)
-            , 'timestamp: target-time })))))
+            , 'timestamp: target-time }))))))
 
   (defun estimate-price:decimal
     ( pair-key:string
@@ -290,14 +276,14 @@
       end:time
     )
     (let*
-      ( (start-observation (search-for-observation pair-key start))
-        (end-observation (search-for-observation pair-key end))
+      ( (start-observation-pair (search-for-observation pair-key start))
+        (end-observation-pair (search-for-observation pair-key end))
       )
-      (enforce (!= {} start-observation) "Did not find start observation")
-      (enforce (!= {} end-observation) "Did not find end observation")
+      (enforce (!= {} start-observation-pair) "Did not find start observation")
+      (enforce (!= {} end-observation-pair) "Did not find end observation")
       (let*
-        ( (start-adjusted (adjust start-observation start))
-          (end-adjusted (adjust end-observation end))
+        ( (start-adjusted (adjust start-observation-pair start))
+          (end-adjusted (adjust end-observation-pair end))
           (price-difference (- (at 'cumulative-price end-adjusted) (at 'cumulative-price start-adjusted)))
           (time-difference (diff-time (at 'timestamp end-adjusted) (at 'timestamp start-adjusted)))
         )
@@ -307,13 +293,22 @@
   )
 
   (defun observation-in-range:bool
-    ( observation:object
+    ( observation0:object
+      observation1:object
       target:time
     )
-    (bind observation
-      { 'timestamp-start := observation-start
-      , 'timestamp-end := observation-end }
-      (and (<= observation-start target) (<= target observation-end))))
+    (if (or (= observation0 {}) (= observation1 {})) false
+      (let*
+        ( (timestamp0 (at 'timestamp observation0))
+          (timestamp1 (at 'timestamp observation1))
+          (start-timestamp (if (< timestamp0 timestamp1) timestamp0 timestamp1))
+          (end-timestamp (if (< timestamp0 timestamp1) timestamp1 timestamp0))
+        )
+        (if
+          (or (= start-timestamp EPOCH_ZERO)
+              (<= end-timestamp start-timestamp))
+              false ;; either we've wrapped around or reached an uninitialized observation
+          (and (<= start-timestamp target) (<= target end-timestamp))))))
 
   (defun observe:object{observation}
     ( oracle:object{oracle}
@@ -333,10 +328,8 @@
         (price (try 0.0 (/ reserve0 reserve1)))
         (current-cumulative (round (+ last-cumulative (* time-delta price)) 8))
       )
-      { 'timestamp-start: last-observed
-      , 'timestamp-end: block-time
-      , 'cumulative-price-start: last-cumulative
-      , 'cumulative-price-end: current-cumulative }
+      { 'timestamp: block-time
+      , 'cumulative-price: current-cumulative }
     )
   )
 
@@ -365,7 +358,7 @@
           (let*
             ( (new-observation (observe oracle pair-key))
               (target-key (get-observation-key oracle 1))
-              (current-cumulative (at 'cumulative-price-end new-observation))
+              (current-cumulative (at 'cumulative-price new-observation))
             )
             (write observations target-key new-observation)
             (update oracles pair-key
