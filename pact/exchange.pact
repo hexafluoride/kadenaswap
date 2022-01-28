@@ -161,18 +161,15 @@
     ( oracle:object{oracle}
       relative-index:integer
     )
-    (read observations (get-observation-key oracle relative-index)))
+    (read observations (get-observation-key oracle relative-index))
+  )
 
   (defun dump-observations:[object{observation}]
-    ( pair-key:string
-    )
-    (let*
-      ( (oracle (read oracles pair-key))
-      )
+    ( pair-key:string )
+    (let ((oracle (read oracles pair-key)))
       (map
         (try-get-observation oracle)
-        (enumerate 0 (at 'observation-capacity oracle))
-      )
+        (enumerate 0 (at 'observation-capacity oracle)))
     )
   )
 
@@ -191,8 +188,7 @@
       { 'pair-key := pair-key
       , 'observations-made := head
       , 'observation-capacity := capacity }
-      (compose-observation-key pair-key (mod (+ head relative-index) capacity))
-    )
+      (compose-observation-key pair-key (mod (+ head relative-index) capacity)))
   )
 
   (defun extend-single
@@ -202,7 +198,8 @@
     (insert observations (compose-observation-key pair-key nth-slot)
       { 'timestamp: EPOCH_ZERO
       , 'price0: 0.0
-      , 'price1: 0.0 }))
+      , 'price1: 0.0 })
+  )
 
   (defun extend-oracle
     ( pair-key:string
@@ -217,7 +214,8 @@
         (enumerate 0 (- new-entries 1)))
       (update oracles pair-key
         { 'observation-capacity: (+ old-capacity new-entries)
-        , 'observations-made: (mod head-absolute old-capacity)})))
+        , 'observations-made: (mod head-absolute old-capacity)}))
+  )
 
   (defun short-circuit-query:object
     ( a:object
@@ -234,7 +232,8 @@
         , 'current: next-observation
         , 'prev: previous-observation
         , 'oracle: oracle
-        , 'time: query-time})))
+        , 'time: query-time}))
+  )
 
   (defun search-for-observation:object{observation}
     ( pair-key:string
@@ -250,7 +249,9 @@
       )
       (if (at 'found result)
         { 'left-observation: (at 'prev result), 'right-observation: (at 'current result) }
-        {})))
+        {})
+    )
+  )
 
   (defun adjust
     ( observation-pair
@@ -259,20 +260,26 @@
     )
     (bind (at 'left-observation observation-pair) { 'timestamp := time-start, (if quote-leg0 'price0 'price1) := price-start }
       (bind (at 'right-observation observation-pair) { 'timestamp := time-end, (if quote-leg0 'price0 'price1) := price-end }
-      (if (= target-time time-start)
-        { 'cumulative-price: price-start
-        , 'timestamp: time-start }
-        (if (= target-time time-end)
-          { 'cumulative-price: price-end
-          , 'timestamp: time-end }
-          (let*
-            ( (price-span (- price-end price-start))
-              (time-span (diff-time time-end time-start))
-              (adjustment-ratio (/ (diff-time target-time time-start) time-span))
-              (price-adjustment-from-start (* price-span adjustment-ratio))
+        (if (= target-time time-start)
+          { 'cumulative-price: price-start
+          , 'timestamp: time-start }
+          (if (= target-time time-end)
+            { 'cumulative-price: price-end
+            , 'timestamp: time-end }
+            (let*
+              ( (price-span (- price-end price-start))
+                (time-span (diff-time time-end time-start))
+                (adjustment-ratio (/ (diff-time target-time time-start) time-span))
+                (price-adjustment-from-start (* price-span adjustment-ratio))
+              )
+              { 'cumulative-price: (+ price-start price-adjustment-from-start)
+              , 'timestamp: target-time }
             )
-            { 'cumulative-price: (+ price-start price-adjustment-from-start)
-            , 'timestamp: target-time }))))))
+          )
+        )
+      )
+    )
+  )
 
   (defun estimate-price:decimal
     ( pair-key:string
@@ -292,8 +299,7 @@
           (price-difference (- (at 'cumulative-price end-adjusted) (at 'cumulative-price start-adjusted)))
           (time-difference (diff-time (at 'timestamp end-adjusted) (at 'timestamp start-adjusted)))
         )
-        (round (/ price-difference time-difference) 8)
-      )
+        (round (/ price-difference time-difference) 8))
     )
   )
 
@@ -313,7 +319,8 @@
           (or (= start-timestamp EPOCH_ZERO)
               (<= end-timestamp start-timestamp))
               false ;; either we've wrapped around or reached an uninitialized observation
-          (and (<= start-timestamp target) (<= target end-timestamp))))))
+          (and (<= start-timestamp target) (<= target end-timestamp)))))
+  )
 
   (defun observe:object{observation}
     ( oracle:object{oracle}
