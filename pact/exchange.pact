@@ -107,6 +107,12 @@
     true
   )
 
+  (defcap OBSERVING ()
+    "Private defcap for recording observations."
+    true)
+
+  (defconst EPOCH_ZERO:time (parse-time "%s" "0"))
+
   (defschema leg
     token:module{fungible-v2}
     reserve:decimal
@@ -121,12 +127,256 @@
 
   (deftable pairs:{pair})
 
+  (defschema oracle
+    pair-key:string
+    observation-capacity:integer
+    observations-made:integer
+    cumulative-price:decimal
+    last-observed:time)
+
+  (deftable oracles:{oracle})
+
+  (defschema observation
+    timestamp-start:time
+    timestamp-end:time
+    cumulative-price-start:decimal
+    cumulative-price-end:decimal)
+
+  (deftable observations:{observation})
+
   (defconst MINIMUM_LIQUIDITY 0.1)
 
   (defconst LOCK_ACCOUNT "lock")
 
   (defun init ()
     (tokens.init-issuer (create-module-guard "issuance"))
+  )
+
+  (defun get-oracle:object{oracle}
+    ( pair-key:string )
+    (read oracles pair-key)
+  )
+
+  (defun try-get-observation:object{observation}
+    ( oracle:object{oracle}
+      relative-index:integer
+    )
+    (let*
+      ( (observation-key (get-observation-key oracle relative-index))
+        (read-observation (read observations observation-key))
+      )
+      (if (or (= {} read-observation) (= (at 'timestamp-start read-observation) EPOCH_ZERO))
+        read-observation
+        read-observation)
+    )
+  )
+
+  (defun dump-observations:[object{observation}]
+    ( pair-key:string
+    )
+    (let*
+      ( (oracle (read oracles pair-key))
+      )
+      (map
+        (try-get-observation oracle)
+        (enumerate 0 (at 'observation-capacity oracle))
+      )
+    )
+  )
+
+  (defun compose-observation-key:string
+    ( pair-key:string
+      absolute-index:integer
+    )
+    (format "{}@{}" [pair-key absolute-index])
+  )
+
+  (defun get-observation-key:string
+    ( pair-oracle:object{oracle}
+      relative-index:integer
+    )
+    (bind pair-oracle
+      { 'pair-key := pair-key
+      , 'observations-made := head
+      , 'observation-capacity := capacity }
+      (compose-observation-key pair-key (mod (+ head relative-index) capacity))
+    )
+  )
+
+  (defun extend-single
+    ( pair-key:string
+      nth-slot:integer
+    )
+    (insert observations (compose-observation-key pair-key nth-slot)
+      { 'timestamp-start: EPOCH_ZERO
+      , 'timestamp-end: EPOCH_ZERO
+      , 'cumulative-price-start: 0.0
+      , 'cumulative-price-end: 0.0 }))
+
+  (defun extend-oracle
+    ( pair-key:string
+      new-entries:integer
+    )
+    (with-read oracles pair-key
+      { 'observations-made := head-absolute
+      , 'observation-capacity := old-capacity }
+      (enforce (> new-entries 0) "Must add nonnegative number of observation slots.")
+      (map
+        (compose (+ old-capacity) (extend-single pair-key))
+        (enumerate 0 (- new-entries 1)))
+      (update oracles pair-key
+        { 'observation-capacity: (+ old-capacity new-entries)
+        , 'observations-made: (mod head-absolute old-capacity)})))
+
+  (defun short-circuit-query:object
+    ( a:object
+      b:integer)
+    (if (at 'found a) a
+      (let*
+        ( (oracle (at 'oracle a))
+          (query-time (at 'time a))
+          (observation (read observations (get-observation-key oracle b)))
+          (found (observation-in-range observation query-time))
+        )
+        { 'found: found
+        , 'result: observation
+        , 'oracle: oracle
+        , 'time: query-time}
+      )))
+
+  (defun search-for-observation:object{observation}
+    ( pair-key:string
+      target:time
+    )
+    (let*
+      ( (oracle (read oracles pair-key))
+        (observation-capacity (at 'observation-capacity oracle))
+        (result (fold
+          (short-circuit-query)
+          { 'found: false, 'time: target, 'oracle: oracle }
+          (enumerate (- observation-capacity 1) 0)))
+      )
+      (if (at 'found result) (at 'result result) {})
+    )
+  )
+
+  (defun adjust
+    ( observation:object{observation}
+      target-time:time
+    )
+    (bind observation
+      { 'cumulative-price-start := price-start
+      , 'cumulative-price-end := price-end
+      , 'timestamp-start := time-start
+      , 'timestamp-end := time-end}
+      (if (= target-time time-start)
+        { 'cumulative-price: price-start
+        , 'timestamp: time-start }
+        (if (= target-time time-end)
+          { 'cumulative-price: price-end
+          , 'timestamp: time-end }
+          (let*
+            ( (price-span (- price-end price-start))
+              (time-span (diff-time time-end time-start))
+              (adjustment-ratio (/ (diff-time target-time time-start) time-span))
+              (price-adjustment-from-start (* price-span adjustment-ratio))
+            )
+            { 'cumulative-price: (+ price-start price-adjustment-from-start)
+            , 'timestamp: target-time })))))
+
+  (defun estimate-price:decimal
+    ( pair-key:string
+      start:time
+      end:time
+    )
+    (let*
+      ( (start-observation (search-for-observation pair-key start))
+        (end-observation (search-for-observation pair-key end))
+      )
+      (enforce (!= {} start-observation) "Did not find start observation")
+      (enforce (!= {} end-observation) "Did not find end observation")
+      (let*
+        ( (start-adjusted (adjust start-observation start))
+          (end-adjusted (adjust end-observation end))
+          (price-difference (- (at 'cumulative-price end-adjusted) (at 'cumulative-price start-adjusted)))
+          (time-difference (diff-time (at 'timestamp end-adjusted) (at 'timestamp start-adjusted)))
+        )
+        (round (/ price-difference time-difference) 8)
+      )
+    )
+  )
+
+  (defun observation-in-range:bool
+    ( observation:object
+      target:time
+    )
+    (bind observation
+      { 'timestamp-start := observation-start
+      , 'timestamp-end := observation-end }
+      (and (<= observation-start target) (<= target observation-end))))
+
+  (defun observe:object{observation}
+    ( oracle:object{oracle}
+      pair-key:string
+    )
+    (require-capability (OBSERVING))
+    (let*
+      ( (pair (read pairs pair-key))
+        (leg0 (at 'leg0 pair))
+        (leg1 (at 'leg1 pair))
+        (last-observed (at 'last-observed oracle))
+        (last-cumulative (at 'cumulative-price oracle))
+        (block-time (at 'block-time (chain-data)))
+        (time-delta (diff-time block-time last-observed))
+        (reserve0 (at 'reserve leg0))
+        (reserve1 (at 'reserve leg1))
+        (price (try 0.0 (/ reserve0 reserve1)))
+        (current-cumulative (round (+ last-cumulative (* time-delta price)) 8))
+      )
+      { 'timestamp-start: last-observed
+      , 'timestamp-end: block-time
+      , 'cumulative-price-start: last-cumulative
+      , 'cumulative-price-end: current-cumulative }
+    )
+  )
+
+  (defun maybe-observe:bool
+    ( pair-key:string
+    )
+    (require-capability (OBSERVING))
+    (with-default-read oracles pair-key
+      { 'observations-made: -1 }
+      { 'observations-made := observations-made }
+      (if (= observations-made -1)
+        (write oracles pair-key
+          { 'pair-key: pair-key
+          , 'observations-made: 0
+          , 'observation-capacity: 1
+          , 'cumulative-price: 0.0
+          , 'last-observed: (at 'block-time (chain-data)) }
+        ) "")
+      (let*
+        ( (chain-data (chain-data))
+          (block-time (at 'block-time chain-data))
+          (oracle (read oracles pair-key))
+          (last-observed (at 'last-observed oracle))
+        )
+        (if (and (!= observations-made -1) (<= block-time last-observed)) false
+          (let*
+            ( (new-observation (observe oracle pair-key))
+              (target-key (get-observation-key oracle 1))
+              (current-cumulative (at 'cumulative-price-end new-observation))
+            )
+            (write observations target-key new-observation)
+            (update oracles pair-key
+              { 'observations-made: (+ 1 (at 'observations-made oracle))
+              , 'cumulative-price: current-cumulative
+              , 'last-observed: block-time })
+            true
+          )
+        )
+      )
+    )
   )
 
   (defun get-pair:object{pair}
@@ -153,6 +403,9 @@
       reserve1:decimal
     )
     (require-capability (UPDATING))
+    (with-capability (OBSERVING)
+      (maybe-observe pair-key)
+    )
     (with-capability (UPDATE pair-key reserve0 reserve1)
       (update pairs pair-key
         { 'leg0: { 'token: (at 'token (at 'leg0 p))
@@ -666,6 +919,8 @@
 (if (read-msg 'upgrade)
   ["upgrade"]
   [ (create-table pairs)
+    (create-table observations)
+    (create-table oracles)
     (init)
   ]
 )
