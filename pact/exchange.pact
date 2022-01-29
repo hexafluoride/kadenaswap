@@ -93,6 +93,10 @@
     true
   )
 
+  (defcap DEBUG (message:string)
+    @event
+    true)
+
   (defcap UPDATING ()
     "Private defcap for updating operations."
     true)
@@ -168,8 +172,8 @@
     ( pair-key:string )
     (let ((oracle (read oracles pair-key)))
       (map
-        (try-get-observation oracle)
-        (enumerate 0 (at 'observation-capacity oracle)))
+        (compose (compose-observation-key pair-key) (read observations))
+        (enumerate 0 (- (at 'observation-capacity oracle) 1)))
     )
   )
 
@@ -217,7 +221,7 @@
         , 'observations-made: (mod head-absolute old-capacity)}))
   )
 
-  (defun short-circuit-query:object
+  (defun linear-short-circuit-query:object
     ( a:object
       b:integer)
     (if (at 'found a) a
@@ -235,7 +239,7 @@
         , 'time: query-time}))
   )
 
-  (defun search-for-observation:object{observation}
+  (defun linear-search-for-observation:object{observation}
     ( pair-key:string
       target:time
     )
@@ -243,12 +247,71 @@
       ( (oracle (read oracles pair-key))
         (observation-capacity (at 'observation-capacity oracle))
         (result (fold
-          (short-circuit-query)
+          (linear-short-circuit-query)
           { 'found: false, 'time: target, 'oracle: oracle, 'current: {} }
           (enumerate (- observation-capacity 1) 0)))
       )
       (if (at 'found result)
         { 'left-observation: (at 'prev result), 'right-observation: (at 'current result) }
+        {})
+    )
+  )
+
+  (defun short-circuit-query:object
+    ( a:object
+      b:integer)
+    (if (at 'found a) a
+      (if (at 'failed a) a
+        (bind a
+          { 'oracle := oracle
+          , 'time := query-time
+          , 'left-index := left-index
+          , 'right-index := right-index
+          , 'left-observation := left-observation
+          , 'right-observation := right-observation }
+          (let*
+            ( (middle-index (/ (+ left-index right-index) 2))
+              (middle-observation (read observations (get-observation-key oracle middle-index)))
+              (go-left (observation-in-range left-observation middle-observation query-time))
+              (go-right (observation-in-range middle-observation right-observation query-time))
+            )
+            (with-capability (DEBUG (format "left {} {} middle {} {} right {} {} query {} go left {} go right {}" [left-index (at 'timestamp left-observation) middle-index (at 'timestamp middle-observation) right-index (at 'timestamp right-observation) query-time go-left go-right]))
+              (if (not (or go-left go-right)) { 'found: false, 'failed: true }
+                { 'right-index: (if go-left middle-index right-index)
+                , 'right-observation: (if go-left middle-observation right-observation)
+                , 'left-index: (if go-left left-index middle-index)
+                , 'left-observation: (if go-left left-observation middle-observation)
+                , 'oracle: oracle
+                , 'time: query-time
+                , 'found: (= 1 (abs (- left-index middle-index)))
+                , 'failed: false }
+              ))))
+      )
+    )
+  )
+
+  (defun search-for-observation:object{observation}
+    ( pair-key:string
+      target:time
+    )
+    (let*
+      ( (oracle (read oracles pair-key))
+        (observation-capacity (at 'observation-capacity oracle))
+        (observed (at 'observations-made oracle))
+        (other-bound (if (>= observed observation-capacity) (- 1 observation-capacity) (- 0 observed)))
+        (result (fold (short-circuit-query)
+          { 'found: false
+          , 'failed: false
+          , 'time: target
+          , 'oracle: oracle
+          , 'right-index: other-bound
+          , 'left-index: 0
+          , 'right-observation: (try-get-observation oracle other-bound)
+          , 'left-observation: (try-get-observation oracle 0) }
+          (enumerate (- observation-capacity 1) 0)))
+      )
+      (if (at 'found result)
+        { 'left-observation: (at 'left-observation result), 'right-observation: (at 'right-observation result) }
         {})
     )
   )
@@ -278,6 +341,28 @@
           )
         )
       )
+    )
+  )
+
+  (defun linear-estimate-price:decimal
+    ( pair-key:string
+      quote-leg0:bool
+      start:time
+      end:time
+    )
+    (let*
+      ( (start-observation-pair (linear-search-for-observation pair-key start))
+        (end-observation-pair (linear-search-for-observation pair-key end))
+      )
+      (enforce (!= {} start-observation-pair) "Did not find start observation")
+      (enforce (!= {} end-observation-pair) "Did not find end observation")
+      (let*
+        ( (start-adjusted (adjust start-observation-pair quote-leg0 start))
+          (end-adjusted (adjust end-observation-pair quote-leg0 end))
+          (price-difference (- (at 'cumulative-price end-adjusted) (at 'cumulative-price start-adjusted)))
+          (time-difference (diff-time (at 'timestamp end-adjusted) (at 'timestamp start-adjusted)))
+        )
+        (round (/ price-difference time-difference) 8))
     )
   )
 
