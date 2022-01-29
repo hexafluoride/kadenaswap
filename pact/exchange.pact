@@ -283,7 +283,7 @@
                 , 'left-observation: (if go-left left-observation middle-observation)
                 , 'oracle: oracle
                 , 'time: query-time
-                , 'found: (= 1 (abs (- left-index middle-index)))
+                , 'found: (= 1 (abs (- (if go-left left-index middle-index) (if go-left middle-index right-index))))
                 , 'failed: false }
               ))))
       )
