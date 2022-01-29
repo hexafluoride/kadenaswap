@@ -308,7 +308,7 @@
           , 'left-index: 0
           , 'right-observation: (try-get-observation oracle other-bound)
           , 'left-observation: (try-get-observation oracle 0) }
-          (enumerate (- observation-capacity 1) 0)))
+          (enumerate (+ 1 (log 2 observation-capacity)) 0)))
       )
       (if (at 'found result)
         { 'left-observation: (at 'left-observation result), 'right-observation: (at 'right-observation result) }
