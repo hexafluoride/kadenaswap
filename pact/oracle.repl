@@ -1,0 +1,291 @@
+
+(begin-tx)
+(env-data
+ { 'ns-admin-keyset: ["admin"]
+ , 'ns-operate-keyset: ["operate"]
+ , 'ns-genesis-keyset: { "keys": [], "pred": "="} })
+(load "root/fungible-v2.pact")
+(load "root/coin.pact")
+(load "root/ns.pact")
+
+(env-data
+  { 'swap-ns-user: ["swap-user"]
+  , 'swap-ns-admin: ["swap-admin"]
+  , 'ns: "swap"
+  , 'upgrade: false
+  })
+(env-keys ["operate", "swap-user", "swap-admin"])
+
+(load "ns.pact")
+(load "fungible-util.pact")
+(load "tokens.pact")
+
+;(verify "swap.tokens")
+
+(load "swap-callable.pact")
+(commit-tx)
+
+;; test init-issuer guard
+(begin-tx)
+(env-keys [])
+(expect-failure "only admin can init-issuer"
+  "Keyset failure"
+  (swap.tokens.init-issuer (keyset-ref-guard 'swap-ns-admin)))
+(rollback-tx)
+
+(begin-tx)
+(env-data
+  { 'swap-ns-user: ["swap-user"]
+  , 'swap-ns-admin: ["swap-admin"]
+  , 'ns: "swap"
+  , 'upgrade: false
+  })
+(env-keys ["operate", "swap-user", "swap-admin"])
+(load "exchange.pact")
+
+(env-dynref fungible-v2 coin)
+(env-dynref swap.swap-callable-v1 swap.noop-callable)
+;(verify "swap.exchange")
+
+(env-data { 'ns: "swap", 'upgrade: false })
+(load "test/ABC.pact")
+(load "test/XYZ.pact")
+(commit-tx)
+
+;; test upgradeability
+(begin-tx)
+(env-data
+  { 'swap-ns-user: ["swap-user"]
+  , 'swap-ns-admin: ["swap-admin"]
+  , 'ns: "swap"
+  , 'upgrade: true })
+(env-keys ["operate", "swap-user", "swap-admin"])
+
+(load "ns.pact")
+(load "fungible-util.pact")
+(load "tokens.pact")
+(load "exchange.pact")
+
+(begin-tx)
+(load "test/tokens-test-fungible.pact")
+(load "test/fungible.repl")
+(test-capability (swap.tokens.CREDIT TOKEN FUNDER_ACCT))
+(expect "fund success" true
+  (test-fund FUNDER_ACCT FUNDER_GUARD FUNDER_BALANCE))
+(commit-tx)
+
+(fungible-v2-test.suite tokens-test-fungible
+   fungible-test-helper-default "transfer-crosschain-tests")
+
+(begin-tx)
+(env-sigs [])
+
+;; test pair canonicity
+(use swap.exchange)
+(expect "canonical pair keys match"
+  (get-pair-key swap.abc coin)
+  (get-pair-key coin swap.abc))
+(expect "pair does not exist yet" false
+  (pair-exists swap.abc coin))
+
+;; test governance on create-pair
+(expect
+  "create pair succeeds without governance"
+  {"key": (get-pair-key coin swap.abc), "account": (create-pair-account (get-pair-key coin swap.abc) "")}
+  (create-pair coin swap.abc "")
+)
+
+(env-keys ["swap-admin"])
+
+(expect-failure
+  "Pair already exists"
+  (create-pair coin swap.abc ""))
+(create-pair coin swap.xyz "")
+(expect "create-pair (2) events" ;; TODO reverse
+  [ { "name": "swap.exchange.CREATE_PAIR"
+    , "params": [ coin swap.abc "coin:swap.abc"
+                  (at 'account (get-pair swap.abc coin))]
+    , "module-hash": (at 'hash (describe-module "swap.exchange"))
+    }
+    { "name": "swap.exchange.CREATE_PAIR"
+    , "params": [ coin swap.xyz "coin:swap.xyz"
+                  (at 'account (get-pair swap.xyz coin))]
+    , "module-hash": (at 'hash (describe-module "swap.exchange"))
+    }
+  ]
+  (env-events true))
+
+(env-data
+  { 'bob: ["bob"]
+  , 'alice: ["alice"]
+  })
+
+(test-capability (coin.COINBASE))
+(coin.coinbase "Bob" (read-keyset 'bob) 100000.0)
+(swap.abc.create-account "Bob" (read-keyset 'bob))
+(swap.abc.fund "Bob" 20000.0)
+(swap.xyz.create-account "Bob" (read-keyset 'bob))
+(swap.xyz.fund "Bob" 60000.0)
+(coin.coinbase "Alice" (read-keyset 'alice) 10000.0)
+(swap.abc.create-account "Alice" (read-keyset 'alice))
+(swap.abc.fund "Alice" 20000.0)
+(commit-tx)
+
+;;
+;; fixture
+;;
+
+(begin-tx)
+(use swap.exchange)
+
+(env-enable-repl-natives true)
+
+(module fixture G
+  (defcap G () true)
+  (defun setup-abc (amount0:decimal amount1:decimal)
+    (env-sigs
+      [ { 'key: "bob"
+        , 'caps:
+          [ (coin.TRANSFER "Bob" (at 'account (get-pair swap.abc coin)) amount0)
+            (swap.abc.TRANSFER "Bob" (at 'account (get-pair swap.abc coin)) amount1)
+          ]}])
+    (env-chain-data { 'block-time: (time "2022-01-20T00:00:00Z") })
+    (with-applied-env
+      (add-liquidity coin swap.abc
+        amount0 amount1 amount0 amount1
+        "Bob" "Bob" (read-keyset "bob")
+        ))
+  )
+
+  (defun setup-xyz (amount0:decimal amount1:decimal)
+    (env-sigs
+      [ { 'key: "bob"
+        , 'caps:
+          [ (coin.TRANSFER "Bob" (at 'account (get-pair swap.xyz coin)) 10.0)
+            (swap.xyz.TRANSFER "Bob" (at 'account (get-pair swap.xyz coin)) 40.0)
+          ]}])
+    (with-applied-env
+      (add-liquidity coin swap.xyz
+        amount0 amount1 amount0 amount1
+        "Bob" "Bob" (read-keyset "bob")
+        ))
+  )
+
+  (defun swap-at-time
+    ( token-in:module{fungible-v2}
+      token-out:module{fungible-v2}
+      amount-in:decimal
+      at-time:time
+    )
+    (begin-tx (format "Swap at {}" [at-time]))
+    (env-sigs [
+      { 'key: "bob"
+      , 'caps:
+        [(token-in::TRANSFER "Bob" (at 'account (swap.exchange.get-pair token-in token-out)) amount-in)]}])
+    (env-chain-data { 'block-time: at-time })
+    (env-gas 0)
+    (with-applied-env
+      (swap.exchange.swap-exact-in amount-in 0.0001 [token-in token-out]
+        "Bob" "Bob" (read-keyset 'bob) ))
+    (print (format "Swap gas {}" [(env-gas)]))
+    (commit-tx)
+  )
+
+  (defun extend-oracle
+    ( token0:module{fungible-v2}
+      token1:module{fungible-v2}
+      new-slots:integer)
+    (let
+      ( (pair-key (swap.exchange.get-pair-key token0 token1))
+      )
+      (begin-tx (format "Add {} more slots to {}:{} oracle" [new-slots token0 token1]))
+      (env-sigs [
+        { 'key: "bob"
+        , 'caps: [(coin.GAS)]}])
+      (env-gas 0)
+      (with-applied-env
+        (swap.exchange.extend-oracle pair-key new-slots))
+      (let ((gas-consumed (env-gas)))
+        (print (format "Added {} slots for {} gas total, {} per row" [new-slots gas-consumed (/ gas-consumed new-slots)]))
+      )
+      (commit-tx)
+    )
+  )
+
+)
+(commit-tx)
+
+(begin-tx)
+(use swap.exchange)
+(fixture.setup-abc 30.0 30.0)
+(fixture.setup-xyz 10.0 40.0)
+
+(get-oracle (swap.exchange.get-pair-key swap.abc coin))
+(commit-tx)
+
+(env-gasmodel 'table)
+(env-gaslimit 9999999)
+
+(fixture.extend-oracle swap.abc coin 1)
+(fixture.extend-oracle swap.abc coin 10)
+
+(begin-tx "Dump all observations")
+(swap.exchange.dump-observations (swap.exchange.get-pair-key swap.abc coin))
+(commit-tx)
+(map (compose (time) (fixture.swap-at-time swap.abc coin 0.2))
+  [ "2022-01-20T00:02:00Z"
+    "2022-01-20T00:03:00Z"
+    "2022-01-20T00:04:00Z"
+    "2022-01-20T00:05:00Z"
+    "2022-01-20T00:06:00Z"
+    "2022-01-20T00:07:00Z"
+    "2022-01-20T00:08:00Z"
+    "2022-01-20T00:09:00Z"
+    "2022-01-20T00:10:00Z" ])
+
+(begin-tx "Dump all observations")
+(swap.exchange.dump-observations (swap.exchange.get-pair-key swap.abc coin))
+(swap.exchange.get-observation-range (swap.exchange.get-pair-key swap.abc coin))
+(commit-tx)
+(fixture.extend-oracle swap.abc coin 50)
+(swap.exchange.get-observation-range (swap.exchange.get-pair-key swap.abc coin))
+
+(map (compose (add-time (time "2022-01-20T00:10:00Z")) (fixture.swap-at-time swap.abc coin 0.2))
+  (enumerate 0 1000 10))
+
+(begin-tx "Dump all observations")
+(swap.exchange.dump-observations (swap.exchange.get-pair-key swap.abc coin))
+(commit-tx)
+(map (compose (time) (fixture.swap-at-time swap.abc coin 0.2))
+  [ "2022-01-20T00:11:00Z"
+    "2022-01-20T00:12:00Z" ])
+
+(print "Swap gas after the first swap in a block: ")
+(map (compose (time) (fixture.swap-at-time swap.abc coin 0.2))
+  [ "2022-01-20T00:12:00Z" ])
+
+(begin-tx "Dump all observations")
+(swap.exchange.dump-observations (swap.exchange.get-pair-key swap.abc coin))
+(swap.exchange.get-observation-range (swap.exchange.get-pair-key swap.abc coin))
+
+(commit-tx)
+
+(begin-tx "Test single queries and gas costs")
+(env-gas 0)
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:20:30Z"))
+(format "Single observation query costs {} gas" [(env-gas)])
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:21:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:22:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:23:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:24:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:25:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:26:00Z"))
+(rollback-tx)
+
+(begin-tx "Test price estimation and gas costs")
+(env-gas 0)
+(swap.exchange.estimate-price swap.abc coin true (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:26:00Z"))
+(format "Single price estimation costs {} gas" [(env-gas)])
+(swap.exchange.estimate-price swap.abc coin false (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:26:00Z"))
+(swap.exchange.estimate-price swap.abc coin true (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:20:01Z"))
+(rollback-tx)
