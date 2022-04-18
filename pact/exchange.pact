@@ -93,10 +93,6 @@
     true
   )
 
-  (defcap DEBUG (message:string)
-    @event
-    true)
-
   (defcap UPDATING ()
     "Private defcap for updating operations."
     true)
@@ -113,6 +109,10 @@
 
   (defcap OBSERVING ()
     "Private defcap for recording observations."
+    true)
+
+  (defcap EXTENDING ()
+    "Private defcap for internal oracle extension handling."
     true)
 
   (defconst EPOCH_ZERO:time (parse-time "%s" "0"))
@@ -155,6 +155,8 @@
   (defun init ()
     (tokens.init-issuer (create-module-guard "issuance"))
   )
+
+  (defun max-int:integer (a:integer b:integer) (if (> a b) a b))
 
   (defun get-oracle:object{oracle}
     ( pair-key:string )
@@ -199,11 +201,11 @@
     ( pair-key:string
       nth-slot:integer
     )
+    (require-capability (EXTENDING))
     (insert observations (compose-observation-key pair-key nth-slot)
       { 'timestamp: EPOCH_ZERO
       , 'price0: 0.0
-      , 'price1: 0.0 })
-  )
+      , 'price1: 0.0 }))
 
   (defun extend-oracle
     ( pair-key:string
@@ -213,49 +215,13 @@
       { 'observations-made := head-absolute
       , 'observation-capacity := old-capacity }
       (enforce (> new-entries 0) "Must add nonnegative number of observation slots.")
-      (map
-        (compose (+ old-capacity) (extend-single pair-key))
-        (enumerate 0 (- new-entries 1)))
+      (with-capability (EXTENDING)
+        (map
+          (compose (+ old-capacity) (extend-single pair-key))
+          (enumerate 0 (- new-entries 1))))
       (update oracles pair-key
         { 'observation-capacity: (+ old-capacity new-entries)
-        , 'observations-made: (mod head-absolute old-capacity)}))
-  )
-
-  (defun linear-short-circuit-query:object
-    ( a:object
-      b:integer)
-    (if (at 'found a) a
-      (let*
-        ( (oracle (at 'oracle a))
-          (query-time (at 'time a))
-          (previous-observation (at 'current a))
-          (next-observation (read observations (get-observation-key oracle b)))
-          (found (observation-in-range previous-observation next-observation query-time))
-        )
-        { 'found: found
-        , 'current: next-observation
-        , 'prev: previous-observation
-        , 'oracle: oracle
-        , 'time: query-time}))
-  )
-
-  (defun linear-search-for-observation:object{observation}
-    ( pair-key:string
-      target:time
-    )
-    (let*
-      ( (oracle (read oracles pair-key))
-        (observation-capacity (at 'observation-capacity oracle))
-        (result (fold
-          (linear-short-circuit-query)
-          { 'found: false, 'time: target, 'oracle: oracle, 'current: {} }
-          (enumerate (- observation-capacity 1) 0)))
-      )
-      (if (at 'found result)
-        { 'left-observation: (at 'prev result), 'right-observation: (at 'current result) }
-        {})
-    )
-  )
+        , 'observations-made: (mod head-absolute old-capacity)})))
 
   (defun short-circuit-query:object
     ( a:object
@@ -275,25 +241,20 @@
               (go-left (observation-in-range left-observation middle-observation query-time))
               (go-right (observation-in-range middle-observation right-observation query-time))
             )
-            (with-capability (DEBUG (format "left {} {} middle {} {} right {} {} query {} go left {} go right {}" [left-index (at 'timestamp left-observation) middle-index (at 'timestamp middle-observation) right-index (at 'timestamp right-observation) query-time go-left go-right]))
-              (if (not (or go-left go-right)) { 'found: false, 'failed: true }
-                { 'right-index: (if go-left middle-index right-index)
-                , 'right-observation: (if go-left middle-observation right-observation)
-                , 'left-index: (if go-left left-index middle-index)
-                , 'left-observation: (if go-left left-observation middle-observation)
-                , 'oracle: oracle
-                , 'time: query-time
-                , 'found: (= 1 (abs (- (if go-left left-index middle-index) (if go-left middle-index right-index))))
-                , 'failed: false }
-              ))))
-      )
-    )
-  )
+            (if (not (or go-left go-right)) { 'found: false, 'failed: true }
+              { 'right-index: (if go-left middle-index right-index)
+              , 'right-observation: (if go-left middle-observation right-observation)
+              , 'left-index: (if go-left left-index middle-index)
+              , 'left-observation: (if go-left left-observation middle-observation)
+              , 'oracle: oracle
+              , 'time: query-time
+              , 'found: (= 1 (abs (- (if go-left left-index middle-index) (if go-left middle-index right-index))))
+              , 'failed: false }
+            ))))))
 
   (defun search-for-observation:object{observation}
     ( pair-key:string
-      target:time
-    )
+      target:time )
     (let*
       ( (oracle (read oracles pair-key))
         (observation-capacity (at 'observation-capacity oracle))
@@ -312,15 +273,12 @@
       )
       (if (at 'found result)
         { 'left-observation: (at 'left-observation result), 'right-observation: (at 'right-observation result) }
-        {})
-    )
-  )
+        {})))
 
-  (defun adjust
+  (defun adjust-observation
     ( observation-pair
       quote-leg0:bool
-      target-time:time
-    )
+      target-time:time )
     (bind (at 'left-observation observation-pair) { 'timestamp := time-start, (if quote-leg0 'price0 'price1) := price-start }
       (bind (at 'right-observation observation-pair) { 'timestamp := time-end, (if quote-leg0 'price0 'price1) := price-end }
         (if (= target-time time-start)
@@ -337,56 +295,52 @@
               )
               { 'cumulative-price: (+ price-start price-adjustment-from-start)
               , 'timestamp: target-time }
-            )
-          )
-        )
-      )
-    )
-  )
+            ))))))
 
-  (defun linear-estimate-price:decimal
-    ( pair-key:string
-      quote-leg0:bool
-      start:time
-      end:time
-    )
+  (defun get-observation-range:[time]
+    ( pair-key:string )
+    "Given a pair key, return a list containing a time range of the oldest and \
+    \ most recent observation. Returns an empty list on unexpected state."
     (let*
-      ( (start-observation-pair (linear-search-for-observation pair-key start))
-        (end-observation-pair (linear-search-for-observation pair-key end))
+      ( (oracle (read oracles pair-key))
+        (head (at 'observations-made oracle))
+        (capacity (at 'observation-capacity oracle))
+        (most-recent-observation (try-get-observation oracle 0))
+        (earliest-observation-1 (try-get-observation oracle 1))
+        (earliest-observation-2 (try-get-observation oracle (- 0 (mod head capacity))))
+        (earliest-observation (if (= EPOCH_ZERO (at 'timestamp earliest-observation-1)) earliest-observation-2 earliest-observation-1))
       )
-      (enforce (!= {} start-observation-pair) "Did not find start observation")
-      (enforce (!= {} end-observation-pair) "Did not find end observation")
-      (let*
-        ( (start-adjusted (adjust start-observation-pair quote-leg0 start))
-          (end-adjusted (adjust end-observation-pair quote-leg0 end))
-          (price-difference (- (at 'cumulative-price end-adjusted) (at 'cumulative-price start-adjusted)))
-          (time-difference (diff-time (at 'timestamp end-adjusted) (at 'timestamp start-adjusted)))
-        )
-        (round (/ price-difference time-difference) 8))
-    )
-  )
+      (if
+        (or
+          (or (= {} most-recent-observation) (= EPOCH_ZERO (at 'timestamp most-recent-observation)))
+          (or (= {} earliest-observation) (= EPOCH_ZERO (at 'timestamp earliest-observation))))
+        []
+        [(at 'timestamp earliest-observation) (at 'timestamp most-recent-observation)])))
 
   (defun estimate-price:decimal
-    ( pair-key:string
+    ( tokenA:module{fungible-v2}
+      tokenB:module{fungible-v2}
       quote-leg0:bool
       start:time
-      end:time
-    )
+      end:time )
+    "TWAP interface function. Given a pair key, start time and end time, estimate \
+    \ the time-weighed average price. quote-leg0 controls whether for pair A:B \
+    \ the price is expressed in A per B or B per A."
     (let*
-      ( (start-observation-pair (search-for-observation pair-key start))
+      ( (pair-key (get-pair-key tokenA tokenB))
+        (max-precision (max-int (tokenA::precision) (tokenB::precision)))
+        (start-observation-pair (search-for-observation pair-key start))
         (end-observation-pair (search-for-observation pair-key end))
       )
       (enforce (!= {} start-observation-pair) "Did not find start observation")
       (enforce (!= {} end-observation-pair) "Did not find end observation")
       (let*
-        ( (start-adjusted (adjust start-observation-pair quote-leg0 start))
-          (end-adjusted (adjust end-observation-pair quote-leg0 end))
+        ( (start-adjusted (adjust-observation start-observation-pair quote-leg0 start))
+          (end-adjusted (adjust-observation end-observation-pair quote-leg0 end))
           (price-difference (- (at 'cumulative-price end-adjusted) (at 'cumulative-price start-adjusted)))
           (time-difference (diff-time (at 'timestamp end-adjusted) (at 'timestamp start-adjusted)))
         )
-        (round (/ price-difference time-difference) 8))
-    )
-  )
+        (round (/ price-difference time-difference) max-precision))))
 
   (defun observation-in-range:bool
     ( observation0:object
@@ -404,8 +358,7 @@
           (or (= start-timestamp EPOCH_ZERO)
               (<= end-timestamp start-timestamp))
               false ;; either we've wrapped around or reached an uninitialized observation
-          (and (<= start-timestamp target) (<= target end-timestamp)))))
-  )
+          (and (<= start-timestamp target) (<= target end-timestamp))))))
 
   (defun observe:object{observation}
     ( oracle:object{oracle}
@@ -469,12 +422,7 @@
               , 'cumulative-price0: cumulative-price0
               , 'cumulative-price1: cumulative-price1
               , 'last-observed: block-time })
-            true
-          )
-        )
-      )
-    )
-  )
+            true)))))
 
   (defun get-pair:object{pair}
     ( tokenA:module{fungible-v2}

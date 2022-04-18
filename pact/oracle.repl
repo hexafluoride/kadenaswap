@@ -212,28 +212,6 @@
     )
   )
 
-  (defun estimate-price-compare-linear
-    ( token0:module{fungible-v2}
-      token1:module{fungible-v2}
-      start-time:time
-      end-time:time
-    )
-    (env-gas 0)
-    (let*
-      ( (naive-result (try 0.0 (swap.exchange.linear-estimate-price (swap.exchange.get-pair-key token0 token1) false start-time end-time)))
-        (naive-gas (env-gas))
-        (clever-result (try 0.0 (swap.exchange.estimate-price (swap.exchange.get-pair-key token0 token1) false start-time end-time)))
-        (clever-gas (- (env-gas) naive-gas))
-      )
-      (if (or (= naive-result 0.0) (= clever-result 0.0))
-        [ (enforce (= naive-result clever-result) (format "Mismatch with inputs {} - {}, events {}" [start-time end-time (env-events true)]))
-          (format "(query unsuccessful) Linear search {} gas, binary search {} gas" [naive-gas clever-gas])
-        ]
-        [ (enforce (= naive-result clever-result) (format "Mismatch with inputs {} - {}, events {}" [start-time end-time (env-events true)]))
-          (format "Linear search {} gas, binary search {} gas" [naive-gas clever-gas])])
-    )
-  )
-
 )
 (commit-tx)
 
@@ -248,9 +226,6 @@
 (env-gasmodel 'table)
 (env-gaslimit 9999999)
 
-; (begin-tx "Dump all observations")
-; (swap.exchange.dump-observations (swap.exchange.get-pair-key swap.abc coin))
-; (commit-tx)
 (fixture.extend-oracle swap.abc coin 1)
 (fixture.extend-oracle swap.abc coin 10)
 
@@ -270,8 +245,10 @@
 
 (begin-tx "Dump all observations")
 (swap.exchange.dump-observations (swap.exchange.get-pair-key swap.abc coin))
+(swap.exchange.get-observation-range (swap.exchange.get-pair-key swap.abc coin))
 (commit-tx)
 (fixture.extend-oracle swap.abc coin 50)
+(swap.exchange.get-observation-range (swap.exchange.get-pair-key swap.abc coin))
 
 (map (compose (add-time (time "2022-01-20T00:10:00Z")) (fixture.swap-at-time swap.abc coin 0.2))
   (enumerate 0 1000 10))
@@ -289,25 +266,26 @@
 
 (begin-tx "Dump all observations")
 (swap.exchange.dump-observations (swap.exchange.get-pair-key swap.abc coin))
+(swap.exchange.get-observation-range (swap.exchange.get-pair-key swap.abc coin))
+
 (commit-tx)
 
 (begin-tx "Test single queries and gas costs")
 (env-gas 0)
-(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:00:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:20:30Z"))
 (format "Single observation query costs {} gas" [(env-gas)])
-(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:01:00Z"))
-(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:02:00Z"))
-(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:03:00Z"))
-(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:04:00Z"))
-(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:05:00Z"))
-(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:06:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:21:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:22:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:23:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:24:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:25:00Z"))
+(swap.exchange.search-for-observation (swap.exchange.get-pair-key swap.abc coin) (time "2022-01-20T00:26:00Z"))
 (rollback-tx)
 
-(begin-tx "Binary vs linear search test")
-(fixture.estimate-price-compare-linear swap.abc coin (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:20:01Z"))
-(fixture.estimate-price-compare-linear swap.abc coin (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:24:00Z"))
-(fixture.estimate-price-compare-linear swap.abc coin (time "2022-01-20T00:19:00Z") (time "2022-01-20T00:25:01Z"))
-(fixture.estimate-price-compare-linear swap.abc coin (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:19:00Z"))
-(fixture.estimate-price-compare-linear swap.abc coin (time "2022-01-20T00:16:00Z") (time "2022-01-20T00:17:01Z"))
-(fixture.estimate-price-compare-linear swap.abc coin (time "2022-01-20T00:13:00Z") (time "2022-01-20T00:16:01Z"))
+(begin-tx "Test price estimation and gas costs")
+(env-gas 0)
+(swap.exchange.estimate-price swap.abc coin true (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:26:00Z"))
+(format "Single price estimation costs {} gas" [(env-gas)])
+(swap.exchange.estimate-price swap.abc coin false (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:26:00Z"))
+(swap.exchange.estimate-price swap.abc coin true (time "2022-01-20T00:20:00Z") (time "2022-01-20T00:20:01Z"))
 (rollback-tx)
